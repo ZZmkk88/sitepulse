@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>服务状态 · sitepulse</title>
+<style>
+  body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f6f8fa;color:#1f2937}
+  .wrap{max-width:680px;margin:0 auto;padding:42px 18px 60px}
+  h1{font-size:24px;margin:0 0 4px}
+  .sub{color:#6b7280;font-size:13.5px;margin-bottom:24px}
+  .banner{border-radius:12px;padding:14px 18px;font-weight:600;margin-bottom:18px;background:#e6f7f3;color:#0b6e5d;border:1px solid #bfe9df}
+  .banner.bad{background:#fdecec;color:#9c2b2b;border-color:#f5c6c6}
+  .row{display:flex;align-items:center;gap:12px;background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:14px 18px;margin-bottom:10px}
+  .dot{width:12px;height:12px;border-radius:50%;flex:none}
+  .up{background:#14b8a6}.down{background:#ef4444}.unknown{background:#9ca3af}
+  .name{font-size:16px;font-weight:600}
+  .meta{margin-left:auto;color:#6b7280;font-size:13px;text-align:right}
+  .st{font-weight:700}
+  .st.up{color:#0b6e5d}.st.down{color:#9c2b2b}.st.unknown{color:#6b7280}
+  footer{color:#9ca3af;font-size:12.5px;text-align:center;margin-top:26px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>服务状态</h1>
+  <div class="sub">各站点当前连通情况，由 sitepulse 自动探测 · 每 30 秒刷新</div>
+  <div class="banner" id="banner">正在获取最新状态…</div>
+  <div id="list"></div>
+  <footer>更新时间：<span id="gen">—</span></footer>
+</div>
+<script>
+function esc(s){const d=document.createElement("div");d.textContent=s??"";return d.innerHTML;}
+async function load(){
+  try{
+    const r = await fetch("/api/public/status");
+    const data = await r.json();
+    const list = data.monitors || [];
+    const down = list.filter(m=>m.status==="down").length;
+    const b = document.getElementById("banner");
+    if(!list.length){ b.textContent = "暂无对外公开的监控项"; b.className = "banner"; }
+    else if(down===0){ b.textContent = "✓ 全部服务正常运行"; b.className = "banner"; }
+    else { b.textContent = `⚠ ${down} 项服务当前中断`; b.className = "banner bad"; }
+    document.getElementById("list").innerHTML = list.map(m=>`
+      <div class="row">
+        <span class="dot ${m.status}"></span>
+        <span class="name">${esc(m.name)}</span>
+        <span class="meta">
+          <span class="st ${m.status}">${m.status==="up"?"正常":m.status==="down"?"中断":"未知"}</span><br>
+          ${m.response_ms!==null && m.response_ms!==undefined ? "响应 "+m.response_ms+" ms" : ""}
+        </span>
+      </div>`).join("");
+    document.getElementById("gen").textContent = (data.generated_at||"").replace("T"," ").replace("+00:00"," UTC");
+  }catch(e){
+    document.getElementById("banner").textContent = "状态获取失败，稍后重试";
+    document.getElementById("banner").className = "banner bad";
+  }
+}
+load(); setInterval(load, 30000);
+</script>
+</body>
+</html>
