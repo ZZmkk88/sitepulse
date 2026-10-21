@@ -31,6 +31,9 @@ MIN_INTERVAL_SECONDS = 5
 MAX_INTERVAL_SECONDS = 86400
 MAX_NAME_LENGTH = 150
 MAX_URL_LENGTH = 2048
+MAX_PASSWORD_LENGTH = 256
+# token_hex(16) 的长度。用户不存在时用它做等长 pbkdf2，不能当真实盐。
+_LOGIN_DUMMY_SALT = "00" * 16
 UPTIME_WINDOW_HOURS = 24
 
 log = logging.getLogger("sitepulse")
@@ -276,11 +279,15 @@ def current_user(request: Request) -> sqlite3.Row:
 
 @app.post("/api/login")
 def login(body: LoginIn):
+    if len(body.password) > MAX_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail="密码过长")
     with get_conn() as conn:
         user = conn.execute(
             "SELECT * FROM users WHERE username = ?", (body.username,)
         ).fetchone()
-        if user is None or hash_password(body.password, user["salt"]) != user["password_hash"]:
+        salt = user["salt"] if user is not None else _LOGIN_DUMMY_SALT
+        digest = hash_password(body.password, salt)
+        if user is None or not secrets.compare_digest(digest, user["password_hash"]):
             raise HTTPException(status_code=401, detail="用户名或密码不正确")
         token = secrets.token_urlsafe(32)
         conn.execute(
@@ -310,6 +317,11 @@ def change_password(
 ):
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="新密码至少 6 位")
+    if (
+        len(body.old_password) > MAX_PASSWORD_LENGTH
+        or len(body.new_password) > MAX_PASSWORD_LENGTH
+    ):
+        raise HTTPException(status_code=400, detail="密码过长")
     if hash_password(body.old_password, user["salt"]) != user["password_hash"]:
         raise HTTPException(status_code=400, detail="旧密码不正确")
     salt = secrets.token_hex(16)
