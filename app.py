@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -34,6 +34,28 @@ MAX_URL_LENGTH = 2048
 UPTIME_WINDOW_HOURS = 24
 
 log = logging.getLogger("sitepulse")
+MAX_PASSWORD_LENGTH = 256
+# token_hex(16) 的长度。用户不存在时用它做等长 pbkdf2，不能当真实盐。
+_LOGIN_DUMMY_SALT = "00" * 16
+
+
+@contextmanager
+def get_conn():
+    """Open a connection and always close it. sqlite3's own context manager
+    only commits/rollbacks; leaving it open holds a lock on the DB file
+    (on Windows this blocks deleting the file, e.g. in self-tests)."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield conn
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -52,13 +74,6 @@ def hash_password(password: str, salt_hex: str) -> str:
     return hashlib.pbkdf2_hmac(
         "sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), 200_000
     ).hex()
-
-
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
 
 
 def init_db() -> None:
@@ -229,7 +244,13 @@ async def lifespan(app: FastAPI):
         task.cancel()
 
 
-app = FastAPI(title="sitepulse", lifespan=lifespan)
+app = FastAPI(
+    title="sitepulse",
+    lifespan=lifespan,
+    docs_url=None,      # 口径第 6 条：接口文档页默认关闭
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 class LoginIn(BaseModel):
@@ -276,11 +297,17 @@ def current_user(request: Request) -> sqlite3.Row:
 
 @app.post("/api/login")
 def login(body: LoginIn):
+    if len(body.password) > MAX_PASSWORD_LENGTH:
+        raise HTTPException(status_code=400, detail="密码过长")
     with get_conn() as conn:
         user = conn.execute(
             "SELECT * FROM users WHERE username = ?", (body.username,)
         ).fetchone()
-        if user is None or hash_password(body.password, user["salt"]) != user["password_hash"]:
+        # 用户不存在时也做一次等长 pbkdf2 计算并用常量时间比对，
+        # 避免从响应耗时反推用户是否存在。
+        salt = user["salt"] if user is not None else _LOGIN_DUMMY_SALT
+        digest = hash_password(body.password, salt)
+        if user is None or not secrets.compare_digest(digest, user["password_hash"]):
             raise HTTPException(status_code=401, detail="用户名或密码不正确")
         token = secrets.token_urlsafe(32)
         conn.execute(
@@ -308,6 +335,11 @@ def logout(request: Request):
 def change_password(
     body: ChangePasswordIn, request: Request, user: sqlite3.Row = Depends(current_user)
 ):
+    if (
+        len(body.old_password) > MAX_PASSWORD_LENGTH
+        or len(body.new_password) > MAX_PASSWORD_LENGTH
+    ):
+        raise HTTPException(status_code=400, detail="密码过长")
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="新密码至少 6 位")
     if hash_password(body.old_password, user["salt"]) != user["password_hash"]:

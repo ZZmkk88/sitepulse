@@ -289,6 +289,29 @@ def test_change_password_revokes_other_sessions_only():
     assert client.get("/api/me", headers=ha).status_code == 200
 
 
+def test_password_length_limit():
+    long_pw = "x" * 257
+    # login: overlong password rejected before any hashing
+    r = client.post("/api/login", json={"username": "admin", "password": long_pw})
+    assert r.status_code == 400
+    # unknown user is still 401 (dummy-salt path must not crash)
+    r = client.post("/api/login", json={"username": "no_such_user", "password": "ok-len"})
+    assert r.status_code == 401
+    # change-password: overlong new password rejected before hashing
+    r1 = client.post("/api/login", json={"username": "admin", "password": "admin123"})
+    h = {"Authorization": f"Bearer {r1.json()['token']}"}
+    r = client.post("/api/change-password", headers=h,
+                    json={"old_password": "admin123", "new_password": long_pw})
+    assert r.status_code == 400
+
+
+def test_docs_pages_closed():
+    # 口径第 6 条：接口文档页默认关闭
+    assert client.get("/docs").status_code == 404
+    assert client.get("/redoc").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+
+
 def test_change_password_flow():
     r = client.post("/api/login", json={"username": "admin", "password": "admin123"})
     token = r.json()["token"]
