@@ -12,7 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -30,6 +30,7 @@ MIN_INTERVAL_SECONDS = 5
 MAX_INTERVAL_SECONDS = 86400
 MAX_NAME_LENGTH = 150
 MAX_URL_LENGTH = 2048
+MAX_PASSWORD_LENGTH = 128
 UPTIME_WINDOW_HOURS = 24
 
 
@@ -51,11 +52,23 @@ def hash_password(password: str, salt_hex: str) -> str:
     ).hex()
 
 
-def get_conn() -> sqlite3.Connection:
+@contextmanager
+def get_conn():
+    """Open a connection and always close it. sqlite3's own context manager
+    only commits; leaving it open locks the DB file for the process lifetime
+    on Windows."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        yield conn
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
@@ -276,7 +289,12 @@ def login(body: LoginIn):
         user = conn.execute(
             "SELECT * FROM users WHERE username = ?", (body.username,)
         ).fetchone()
-        if user is None or hash_password(body.password, user["salt"]) != user["password_hash"]:
+        password = body.password
+        if (
+            user is None
+            or len(password) > MAX_PASSWORD_LENGTH
+            or hash_password(password, user["salt"]) != user["password_hash"]
+        ):
             raise HTTPException(status_code=401, detail="用户名或密码不正确")
         token = secrets.token_urlsafe(32)
         conn.execute(
@@ -301,17 +319,30 @@ def logout(request: Request):
 
 
 @app.post("/api/change-password")
-def change_password(body: ChangePasswordIn, user: sqlite3.Row = Depends(current_user)):
+def change_password(
+    body: ChangePasswordIn, request: Request, user: sqlite3.Row = Depends(current_user)
+):
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="新密码至少 6 位")
+    if (
+        len(body.new_password) > MAX_PASSWORD_LENGTH
+        or len(body.old_password) > MAX_PASSWORD_LENGTH
+    ):
+        raise HTTPException(status_code=400, detail="密码过长")
     if hash_password(body.old_password, user["salt"]) != user["password_hash"]:
         raise HTTPException(status_code=400, detail="旧密码不正确")
     salt = secrets.token_hex(16)
+    auth = request.headers.get("Authorization", "")
+    token = auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""
     with get_conn() as conn:
         conn.execute(
             "UPDATE users SET password_hash = ?, salt = ?,"
             " must_change_password = 0 WHERE id = ?",
             (hash_password(body.new_password, salt), salt, user["id"]),
+        )
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id = ? AND token != ?",
+            (user["id"], token),
         )
     return {"ok": True}
 
