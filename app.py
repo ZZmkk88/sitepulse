@@ -5,6 +5,7 @@ a public status page). Design notes live in NOTES.md.
 """
 import asyncio
 import hashlib
+import logging
 import os
 import secrets
 import sqlite3
@@ -31,6 +32,8 @@ MAX_INTERVAL_SECONDS = 86400
 MAX_NAME_LENGTH = 150
 MAX_URL_LENGTH = 2048
 UPTIME_WINDOW_HOURS = 24
+
+log = logging.getLogger("sitepulse")
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +209,8 @@ async def scheduler_loop() -> None:
         try:
             await run_due_probes()
         except Exception:
-            pass  # the loop must survive a bad round; next tick retries
+            # 调度循环本身必须存活；异常只记录，不吞得无声无息
+            log.exception("scheduler round failed")
         await asyncio.sleep(1)
 
 
@@ -301,18 +305,29 @@ def logout(request: Request):
 
 
 @app.post("/api/change-password")
-def change_password(body: ChangePasswordIn, user: sqlite3.Row = Depends(current_user)):
+def change_password(
+    body: ChangePasswordIn, request: Request, user: sqlite3.Row = Depends(current_user)
+):
     if len(body.new_password) < 6:
         raise HTTPException(status_code=400, detail="新密码至少 6 位")
     if hash_password(body.old_password, user["salt"]) != user["password_hash"]:
         raise HTTPException(status_code=400, detail="旧密码不正确")
     salt = secrets.token_hex(16)
+    # 本次请求用的令牌：改密成功后吊销除它之外的全部会话（口径第 2 条）。
+    # 取不到时不删，避免把自己踢下线。
+    auth = request.headers.get("Authorization", "")
+    current_token = auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""
     with get_conn() as conn:
         conn.execute(
             "UPDATE users SET password_hash = ?, salt = ?,"
             " must_change_password = 0 WHERE id = ?",
             (hash_password(body.new_password, salt), salt, user["id"]),
         )
+        if current_token:
+            conn.execute(
+                "DELETE FROM sessions WHERE user_id = ? AND token != ?",
+                (user["id"], current_token),
+            )
     return {"ok": True}
 
 
@@ -542,4 +557,5 @@ init_db()
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
+    host = os.environ.get("HOST", "127.0.0.1").strip() or "127.0.0.1"
+    uvicorn.run(app, host=host, port=int(os.environ.get("PORT", "8000")))

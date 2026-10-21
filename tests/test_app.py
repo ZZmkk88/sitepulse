@@ -259,6 +259,36 @@ def test_delete_monitor(auth, fake_site):
     assert left == 0
 
 
+# ---------------------------------------------------------------------------
+# change-password revokes other sessions, keeps the current one (口径第 2 条)
+# ---------------------------------------------------------------------------
+
+def test_change_password_revokes_other_sessions_only():
+    r1 = client.post("/api/login", json={"username": "admin", "password": "admin123"})
+    assert r1.status_code == 200
+    token_a = r1.json()["token"]
+    r2 = client.post("/api/login", json={"username": "admin", "password": "admin123"})
+    token_b = r2.json()["token"]
+    ha = {"Authorization": f"Bearer {token_a}"}
+    hb = {"Authorization": f"Bearer {token_b}"}
+
+    r = client.post("/api/change-password", headers=ha,
+                    json={"old_password": "admin123", "new_password": "tmp-revoke-1"})
+    assert r.status_code == 200
+    # the other session is revoked, the current one stays valid
+    assert client.get("/api/me", headers=hb).status_code == 401
+    assert client.get("/api/me", headers=ha).status_code == 200
+    # old password no longer works
+    assert client.post("/api/login",
+                       json={"username": "admin", "password": "admin123"}).status_code == 401
+    # restore the original password with the still-valid current session,
+    # so the following tests keep working against admin/admin123
+    r = client.post("/api/change-password", headers=ha,
+                    json={"old_password": "tmp-revoke-1", "new_password": "admin123"})
+    assert r.status_code == 200
+    assert client.get("/api/me", headers=ha).status_code == 200
+
+
 def test_change_password_flow():
     r = client.post("/api/login", json={"username": "admin", "password": "admin123"})
     token = r.json()["token"]
