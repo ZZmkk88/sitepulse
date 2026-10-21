@@ -49,6 +49,7 @@ python -m venv .venv
 | 变量 | 说明 | 默认 |
 |---|---|---|
 | `PORT` | 监听端口（Windows PowerShell 里用 `$env:PORT=8123` 设置） | 8000 |
+| `HOST` | 监听地址。需要从其他机器访问时再设为 `0.0.0.0` | `127.0.0.1` |
 | `SITEPULSE_DB_PATH` | SQLite 数据库文件位置 | `data/sitepulse.db` |
 | `SP_INITIAL_USERNAME` / `SP_INITIAL_PASSWORD` | 首次启动创建的初始账号 | admin / admin123 |
 
